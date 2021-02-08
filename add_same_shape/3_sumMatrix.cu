@@ -30,6 +30,7 @@ void launchKernel_1block1grid(float *x, float *y, float *dst, int nx, int ny) {
    // 1d block 1d grid
    int block = 32;
    int grid = (nx * ny + block - 1) / block;
+   printf("11 grid x %d y %d, block x %d y %d", grid, grid, block, block);
    sumMatrix<<<grid, block>>>(x, y, dst, nx * ny, 1);
 }
 
@@ -37,15 +38,17 @@ void launchKernel_1block2grid(float *x, float *y, float *dst, int nx, int ny) {
    // 1d block 1d iid
    int num = 32;
    dim3 block(num);
-   dim3 grid((nx + num -1) / block.x, ny);
+   dim3 grid((nx + block.x -1) / block.x, ny);
+   printf("12 grid x %d y %d, block x %d y %d", grid.x, grid.y, block.x, block.y);
    sumMatrix<<<grid, block>>>(x, y, dst, nx , ny);
 }
 void launchKernel_2block2grid(float *x, float *y, float *dst, int nx, int ny) {
    // 1d block 1d grid
    int num_x = 32;
-   int num_y = 32;
+   int num_y = 16;
    dim3 block(num_x, num_y);
-   dim3 grid((nx + num_x -1) / num_x, (ny + num_y -1) / num_y);
+   dim3 grid((nx + block.x -1) / block.x, (ny + block.y -1) / block.y);
+   printf("22 grid x %d y %d, block x %d y %d", grid.x, grid.y, block.x, block.y);
    sumMatrix<<<grid, block>>>(x, y, dst, nx , ny);
 }
 
@@ -72,11 +75,11 @@ int main(void) {
    CHECK(cudaMemcpy(y_d, y_h, num * sizeof(float), cudaMemcpyHostToDevice));
    
    // 1d block 1d grid
-   launchKernel_1block1grid(x_d, y_d, dst_d, nx, ny);
+   // launchKernel_1block1grid(x_d, y_d, dst_d, nx, ny);
    // 2d block 1d grid
-  // launchKernel_1block2grid(x_d, y_d, dst_d, nx, ny);
+   // launchKernel_1block2grid(x_d, y_d, dst_d, nx, ny);
    // 2d block 2d grid
- //  launchKernel_2block2grid(x_d, y_d, dst_d, nx, ny);
+   launchKernel_2block2grid(x_d, y_d, dst_d, nx, ny);
    CHECK(cudaMemcpy(dst_dev_cpu, dst_d, num * sizeof(float), cudaMemcpyDeviceToHost));
 
    double start, end;
