@@ -1,8 +1,28 @@
-#include<iostream>
+#include <iostream>
+#include <vector>
+#include <numeric>
+#include <cmath>
+#include <limits>
+#include <chrono>
+#include <algorithm>
+#include <iomanip>
+#include <cstring>
 #include<addTest.h>
 #define block_size 4
 #define block_size_x 8
 #define block_size_y 1
+#define BLOCK_SIZE  512
+// GPU
+void check_error(void)
+{
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
+  {
+    std::cerr << "Error: " << cudaGetErrorString(err) << std::endl;
+    exit(err);
+  }
+}
+
 // GPU
 template<typename scalar_t, int vec_size>
 struct alignas(sizeof(scalar_t) * 4) aligned_vector {
@@ -96,16 +116,59 @@ __global__ void gpuReduce_vec_4(float*x, float* y, int nx, int ny) {
      dst[t] = temp;
    }
 }
+__global__ void gpuReduce_share(float*x, float* y, int nx, int ny) {
+   int idx = blockIdx.x * blockDim.x + threadIdx.x;
+   int idy = blockIdx.y * BLOCK_SIZE;
+   extern  __shared__ float staticShared[];
+   float temp = 0.0f;
+   if (idx > nx) return;
+   for (int iy = 0; iy < BLOCK_SIZE && idy + iy < ny; iy ++) {
+      int id = (idy + iy) * nx + idx;
+      staticShared[threadIdx.x] += x[id]; 
+     // float tp = x[id];
+     // temp += tp;
+   }
+   y[idx + blockIdx.y * nx] = staticShared[threadIdx.x];
+}
+
 __global__ void gpuReduce_base(float*x, float* y, int nx, int ny) {
    int idx = blockIdx.x * blockDim.x + threadIdx.x;
    float temp = 0.0f;
    if (idx > nx) return;
-   for (int iy = 0; iy < ny; iy++) {
-       float tp = x[idx + (iy * nx)];
-       temp += tp; 
+   for (int iy = 0; iy < ny; iy ++) {
+      int id = iy * nx + idx;
+      float tp = x[id];
+      temp += tp;
    }
-   y[idx] = temp;
+   y[idx + blockIdx.y * nx] = temp;
 }
+// reduce_y + reduce_global 
+__global__ void gpuReduce_y(float*x, float* y, int nx, int ny) {
+   int idx = blockIdx.x * blockDim.x + threadIdx.x;
+   int idy = blockIdx.y * BLOCK_SIZE;
+   extern  __shared__ float staticShared[];
+   float temp = 0.0f;
+   if (idx > nx) return;
+   for (int iy = 0; iy < BLOCK_SIZE && idy + iy < ny; iy ++) {
+      int id = (idy + iy) * nx + idx;
+      float tp = x[id];
+      temp += tp;
+   }
+   y[idx + blockIdx.y * nx] = temp;
+}
+__global__ void gpuReduce_global(float*x, float* y, int nx, int ny) {
+   int idx = blockIdx.x * blockDim.x + threadIdx.x;
+   int idy = blockIdx.y * BLOCK_SIZE;
+   float temp = 0.0f;
+   if (idx > nx) return;
+   for (int iy = 0; iy < BLOCK_SIZE && idy + iy < ny; iy ++) {
+      int id = (idy + iy) * nx + idx;
+      float tp = x[id];
+      temp += tp;
+   }
+   y[idx + blockIdx.y * nx] = temp;
+}
+
 // CPU
 void cpuCopy(float *x, float * y, int nx, int ny) {
    for(int i = 0; i < nx; i ++) {
@@ -115,7 +178,6 @@ void cpuCopy(float *x, float * y, int nx, int ny) {
        y[idx_dst] = x[idx_src];
      
      }
-   
    }
 }
 
@@ -136,8 +198,8 @@ int main(int block_size_t, char *argv[]) {
   // int ny = 2048;
   // int ny=     512    , nx =   2048; 
   // int ny=     128    , nx =   1024; 
- //  int ny=     30522  , nx =   1024; 
-   int ny=     1024   , nx =   16  ; 
+   int ny=     30522  , nx =   1024; 
+ //  int ny=     1024   , nx =   16  ; 
    int num = nx * ny;
    float* x_h = (float *)malloc(num * sizeof(float));
    float* y_h = (float *)malloc(num * sizeof(float));
@@ -146,13 +208,14 @@ int main(int block_size_t, char *argv[]) {
    for(int i = 0; i < num ; i++) {
      gpu_h[i] = 0;
      y_h[i] = 0;
-     x_h[i] = i % 10;
+     x_h[i] = 1 % 10;
    } 
    float *x_d, *y_d;
    CHECK(cudaMalloc((float**)&x_d, num * sizeof(float)));
    CHECK(cudaMalloc((float**)&y_d, num * sizeof(float)));
 
    CHECK(cudaMemcpy(x_d, x_h, num * sizeof(float), cudaMemcpyHostToDevice));
+   CHECK(cudaMemcpy(y_d, y_h, num * sizeof(float), cudaMemcpyHostToDevice));
    int block = 32;
    int grid = (nx + block_size -1) / block_size;
    double start, end;
@@ -166,31 +229,47 @@ int main(int block_size_t, char *argv[]) {
   
    int block_1 =  32;
    int grid_1 = (nx + block_1 - 1)/ block_1;
-
+   int grid_y = (ny + BLOCK_SIZE - 1)/BLOCK_SIZE;
+   dim3 grid3(grid_1, grid_y);
+   dim3 block3(block_1, 1);
+   std::chrono::high_resolution_clock::time_point t1, t2;
+   std::vector<std::vector<double>> timings(5);
+   gpuReduce_vec_4<<<grid_4, block_4>>>(x_d, y_d, nx, ny);
+   cudaDeviceSynchronize();
    for (int i = 0; i < 1000; i++) {
     
-     //gpuCopy<<<grid, block, sizeof(float) * block * block_size>>>(x_d, y_d, nx, ny, block_size_t);
-     //cudaDeviceSynchronize();
-
-     //gpuCopy_thread<<<grid_2, block_num, sizeof(float) * block_size_x * block_size_y * block_num>>>(x_d, y_d, nx, ny);
-     //cudaDeviceSynchronize();
-
      gpuReduce_block_size<<<grid_2, block_num, sizeof(float) * block_size_x * block_num>>>(x_d, y_d, nx, ny);
      cudaDeviceSynchronize();
 
      gpuReduce_vec_4<<<grid_4, block_4>>>(x_d, y_d, nx, ny);
      cudaDeviceSynchronize();
 
-     gpuReduce_base<<<grid_1, block_1>>>(x_d, y_d, nx, ny);
+     gpuReduce_base<<<grid3, block3>>>(x_d, y_d, nx, ny);
+     cudaDeviceSynchronize();
+
+     t1 = std::chrono::high_resolution_clock::now();
+     gpuReduce_y<<<grid3, block3, sizeof(float) * block_1>>>(x_d, y_d, nx, ny);
+     check_error();
+     cudaDeviceSynchronize();
+     check_error();
+     t2 = std::chrono::high_resolution_clock::now();
+     timings[0].push_back(std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count());
+
+
+     gpuReduce_global<<<grid_1, block_1>>>(y_d, y_d, nx, grid_y);
      cudaDeviceSynchronize();
    }
    cudaDeviceSynchronize();
    end = cpuSecond();
    cpuReduce(x_h,y_h, nx, ny);   
+   double average = std::accumulate(timings[0].begin()+1, timings[0].end(), 0.0) / (double)(1000);
    //cpuCopy(x_h,y_h, nx, ny);   
-   printf("Kernel Time is %f s\n", end - start);
+   printf("Kernel Time is %f s %f ms\n", end - start, average * 1000);
    CHECK(cudaMemcpy(gpu_h, y_d, num * sizeof(float), cudaMemcpyDeviceToHost));
-   checkResult(y_h, gpu_h, num);
+  // for(int i = 0; i < nx * grid_y; i++) {
+  //    if(gpu_h[i] != 512) printf("error %d  %f %d\n", i / nx, gpu_h[26624], i);
+  // }
+   checkResult(y_h, gpu_h, nx);
    cudaFree(x_d);
    cudaFree(y_d);
    free(x_h);
